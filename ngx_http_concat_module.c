@@ -7,7 +7,8 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
-
+#include <ngx_md5.h>
+#include "ngx_jsmin.h"
 
 typedef struct {
     ngx_flag_t   enable;
@@ -15,11 +16,13 @@ typedef struct {
     ngx_flag_t   unique;
     ngx_str_t    delimiter;
     ngx_flag_t   ignore_file_error;
+    ngx_str_t    cached_path;
 
     ngx_hash_t   types;
     ngx_array_t *types_keys;
 } ngx_http_concat_loc_conf_t;
 
+const ngx_int_t MD5_STR_LEN = 2*MD5_DIGEST_LENGTH;
 
 static ngx_int_t ngx_http_concat_add_path(ngx_http_request_t *r,
     ngx_array_t *uris, size_t max, ngx_str_t *path, u_char *p, u_char *v);
@@ -80,6 +83,13 @@ static ngx_command_t  ngx_http_concat_commands[] = {
       offsetof(ngx_http_concat_loc_conf_t, ignore_file_error),
       NULL },
 
+    { ngx_string("concat_cached_path"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_concat_loc_conf_t, cached_path),
+      NULL },
+
       ngx_null_command
 };
 
@@ -115,6 +125,10 @@ ngx_module_t  ngx_http_concat_module = {
 };
 
 
+ngx_int_t ngx_http_minified_file(ngx_http_request_t *r, ngx_str_t *filename);
+ngx_str_t ngx_md5_path_hash(ngx_str_t *in,ngx_http_request_t *r);
+ngx_str_t ngx_cached_filename(ngx_str_t * cached_path,ngx_str_t *filename,ngx_str_t *md5_str,ngx_http_request_t *r);
+
 static ngx_int_t
 ngx_http_concat_handler(ngx_http_request_t *r)
 {
@@ -132,6 +146,8 @@ ngx_http_concat_handler(ngx_http_request_t *r)
     ngx_open_file_info_t        of;
     ngx_http_core_loc_conf_t   *ccf;
     ngx_http_concat_loc_conf_t *clcf;
+
+
 
     if (r->uri.data[r->uri.len - 1] != '/') {
         return NGX_DECLINED;
@@ -165,10 +181,15 @@ ngx_http_concat_handler(ngx_http_request_t *r)
 
     path.len = last - path.data;
 
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                    "http concat root: \"%V\"", &path);
 
     ccf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+
+    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                   "http cached path: \"%s\"", clcf->cached_path.data);
+
+
 
 #if (NGX_SUPPRESS_WARN)
     ngx_memzero(&uris, sizeof(ngx_array_t));
@@ -227,6 +248,9 @@ ngx_http_concat_handler(ngx_http_request_t *r)
     last_type = NULL;
     length = 0;
     uri = uris.elts;
+
+    ngx_str_t md5_str;
+
     for (i = 0; i < uris.nelts; i++) {
         filename = uri + i;
 
@@ -241,6 +265,11 @@ ngx_http_concat_handler(ngx_http_request_t *r)
                 break;
             }
         }
+
+        ngx_http_minified_file(r,filename);
+	md5_str = ngx_md5_path_hash(filename,r);
+        
+        *filename = ngx_cached_filename(&clcf->cached_path,filename,&md5_str,r);
 
         r->headers_out.content_type.len = 0;
         if (ngx_http_set_content_type(r) != NGX_OK) {
@@ -277,6 +306,8 @@ ngx_http_concat_handler(ngx_http_request_t *r)
         of.errors = ccf->open_file_cache_errors;
         of.events = ccf->open_file_cache_events;
 
+	ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                   "http open cached file: \"%s\"", filename->data);
         if (ngx_open_cached_file(ccf->open_file_cache, filename, &of, r->pool)
             != NGX_OK)
         {
@@ -426,9 +457,243 @@ ngx_http_concat_handler(ngx_http_request_t *r)
         b->last_buf = 1;
     }
 
+    //just test for create time file
+    /*ngx_str_t tmp_filename= ngx_string("/tmp/aaaaa.txt");
+    ngx_fd_t wfd = ngx_open_file(tmp_filename.data,NGX_FILE_RDWR,NGX_FILE_OPEN,0);
+    ngx_file_t  wfile ;
+    wfile.fd = wfd;
+    wfile.name = tmp_filename;
+    */
+
+    //ngx_write_chain_to_file(&wfile,&out,0,r->pool);
     return ngx_http_output_filter(r, &out);
 }
 
+ngx_int_t ngx_rstrchr(u_char *str,u_char c,size_t len){
+	ngx_int_t pos = len - 1;
+	while(pos>=0){
+		if(str[pos] == c){
+			break;
+		}
+		--pos;
+	}
+	return pos;
+}
+
+ngx_str_t ngx_md5_path_hash(ngx_str_t *in,ngx_http_request_t *r){
+    ngx_md5_t md5;
+    u_char *md5_str = ngx_pnalloc(r->pool,MD5_STR_LEN+1);
+    u_char md5_digest[MD5_DIGEST_LENGTH];     
+    ngx_md5_init(&md5);
+    ngx_md5_update(&md5, in->data, in->len);
+    ngx_md5_final(md5_digest, &md5);
+    ngx_hex_dump(md5_str, md5_digest, MD5_DIGEST_LENGTH);
+    md5_str[MD5_STR_LEN] = '\0';
+    
+    ngx_str_t result;
+    result.data = md5_str;
+    result.len = ngx_strlen(result.data);
+    return result;
+}
+
+ngx_str_t ngx_cached_filename(ngx_str_t * cached_path,ngx_str_t *filename,ngx_str_t *md5_str,ngx_http_request_t *r){
+    ngx_str_t tmp_filename;
+    int last_spl_pos = 0;
+    int last_len = 0;
+    u_char *last;
+    last_spl_pos = ngx_rstrchr(filename->data,'/',filename->len);
+
+    last = ngx_pnalloc(r->pool,filename->len);
+    ngx_memcpy(last, filename->data+last_spl_pos+1, filename->len-last_spl_pos);
+
+    last_len = filename->len - last_spl_pos - 1;
+    tmp_filename.data = ngx_pnalloc(r->pool, last_len + cached_path->len+1+1 + MD5_STR_LEN+1 );
+
+    ngx_memcpy(tmp_filename.data,cached_path->data,cached_path->len);
+    ngx_memcpy(tmp_filename.data + cached_path->len,"/",1);
+    ngx_memcpy(tmp_filename.data + cached_path->len+1 ,last,last_len );
+    ngx_memcpy(tmp_filename.data + cached_path->len+1+last_len,"_",1);
+    ngx_memcpy(tmp_filename.data + cached_path->len+1 +last_len + 1 ,md5_str->data,MD5_STR_LEN );
+
+    tmp_filename.len = last_len + cached_path->len+1+1 +MD5_STR_LEN ;
+    tmp_filename.data[tmp_filename.len] = '\0';
+    return tmp_filename;
+
+}
+ngx_int_t ngx_http_minified_file(ngx_http_request_t *r, ngx_str_t *filename){
+
+//    ngx_buf_t *src;
+    ngx_buf_t *dst = NULL;
+    ngx_buf_t *min_dst = NULL;
+    int n = 0;
+    int size = 0;
+    ngx_open_file_info_t        of;
+    ngx_int_t rc;
+    ngx_uint_t  level;
+
+    ngx_str_t tmp_filename;
+    ngx_http_concat_loc_conf_t *clcf;
+    ngx_http_core_loc_conf_t   *ccf;
+    rc = 0;
+
+    clcf = ngx_http_get_module_loc_conf(r, ngx_http_concat_module);
+    ccf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+
+    ngx_str_t cached_path = clcf->cached_path;
+    ngx_str_t md5_str; 
+    md5_str = ngx_md5_path_hash(filename,r);
+    
+
+    ngx_memzero(&of, sizeof(ngx_open_file_info_t));
+
+    of.read_ahead = ccf->read_ahead;
+    of.directio = ccf->directio;
+    of.valid = ccf->open_file_cache_valid;
+    of.min_uses = ccf->open_file_cache_min_uses;
+    of.errors = ccf->open_file_cache_errors;
+    of.events = ccf->open_file_cache_events;
+
+    if (ngx_open_cached_file(ccf->open_file_cache, filename, &of, r->pool)
+        != NGX_OK)
+    {
+        switch (of.err) {
+
+        case 0:
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+
+        case NGX_ENOENT:
+        case NGX_ENOTDIR:
+        case NGX_ENAMETOOLONG:
+
+            level = NGX_LOG_ERR;
+            rc = NGX_HTTP_NOT_FOUND;
+            break;
+
+        case NGX_EACCES:
+
+            level = NGX_LOG_ERR;
+            rc = NGX_HTTP_FORBIDDEN;
+            break;
+
+        default:
+
+            level = NGX_LOG_CRIT;
+            rc = NGX_HTTP_INTERNAL_SERVER_ERROR;
+            break;
+        }
+
+        if (rc != NGX_HTTP_NOT_FOUND || ccf->log_not_found) {
+            ngx_log_error(level, r->connection->log, of.err,
+                          "%s \"%V\" failed", of.failed, filename);
+        }
+
+        if (clcf->ignore_file_error
+            && (rc == NGX_HTTP_NOT_FOUND || rc == NGX_HTTP_FORBIDDEN))
+        {
+            //continue;
+        }
+
+        return rc;
+    }
+
+    if (!of.is_file) {
+        ngx_log_error(NGX_LOG_CRIT, r->connection->log, ngx_errno,
+                      "\"%V\" is not a regular file", filename);
+        if (clcf->ignore_file_error) {
+            //continue;
+        }
+
+        return NGX_HTTP_NOT_FOUND;
+    }
+
+    if (of.size == 0) {
+        //continue;
+    }
+
+    ngx_file_t *src_file = ngx_pcalloc(r->pool, sizeof(ngx_file_t));
+    if (src_file == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    src_file->fd = of.fd;
+    src_file->name = *filename;
+    src_file->log = r->connection->log;
+    src_file->directio = of.is_directio;
+
+    ngx_file_info_t fi;
+    tmp_filename = ngx_cached_filename(&cached_path,filename,&md5_str,r);
+    ngx_file_info(tmp_filename.data,&fi);
+    ngx_int_t mtime = ngx_file_mtime(&fi);
+    if( of.mtime > mtime){
+	//check mtime for regenerate
+	    size = of.size;
+
+	    ngx_buf_t *b;
+	    ngx_fd_t wfd = ngx_open_file(tmp_filename.data,NGX_FILE_RDWR,NGX_FILE_TRUNCATE ,0);
+	    ngx_file_t  wfile ;
+	    wfile.fd = wfd;
+	    wfile.name = tmp_filename;
+	    wfile.log = r->connection->log;
+
+	    b = ngx_calloc_buf(r->pool); 
+	    if (b == NULL) {
+		//return NGX_HTTP_INTERNAL_SERVER_ERROR;
+	    }
+
+	    b->start = ngx_palloc(r->pool, size+1);
+	    b->pos = b->start;
+	    b->last = b->start;
+	    b->end = b->last + size ;
+	    b->temporary = 1;
+	//    b->tag = ctx->tag;
+	//    b->recycled = recycled;
+
+	    dst = b;
+	    
+	    #if (NGX_HAVE_FILE_AIO)
+	    
+		 ngx_output_chain_ctx_t       *ctx;
+		 ctx = ngx_http_get_module_ctx(r, ngx_http_concat_module);
+		 if (ctx->aio_handler) {
+		     n = ngx_file_aio_read(src_file, dst->pos, (size_t) size,
+					   0, ctx->pool);
+		     if (n == NGX_AGAIN) {
+			 ctx->aio_handler(ctx, src->file);
+			 return NGX_AGAIN;
+		     }
+	    
+		 } else {
+		     n = ngx_read_file(src_file, dst->pos, (size_t) size,
+				       0);
+		 }
+	    #else
+	    
+		n = ngx_read_file(src_file, dst->pos, (size_t) size, 0);
+		dst->end[0] = 0;
+
+		b = ngx_calloc_buf(r->pool); 
+		if (b == NULL) {
+		    //return NGX_HTTP_INTERNAL_SERVER_ERROR;
+		}
+
+		b->start = ngx_palloc(r->pool, size);
+		b->pos = b->start;
+		b->last = b->start;
+		b->end = b->last + size;
+		b->temporary = 1;
+
+		min_dst = b;
+		jsmin(dst,min_dst);
+		size = min_dst->end - min_dst->start;
+		ngx_write_file(&wfile,min_dst->pos,size,0);
+		ngx_close_file(wfile.fd);
+	    
+	    #endif
+	}
+    
+	n++;
+        return rc;
+}
 
 static ngx_int_t
 ngx_http_concat_add_path(ngx_http_request_t *r, ngx_array_t *uris,
@@ -473,7 +738,7 @@ ngx_http_concat_add_path(ngx_http_request_t *r, ngx_array_t *uris,
         return NGX_HTTP_BAD_REQUEST;
     }
 
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                    "http concat add file: \"%s\"", uri->data);
 
     return NGX_OK;
@@ -501,6 +766,7 @@ ngx_http_concat_create_loc_conf(ngx_conf_t *cf)
     conf->ignore_file_error = NGX_CONF_UNSET;
     conf->max_files = NGX_CONF_UNSET_UINT;
     conf->unique = NGX_CONF_UNSET;
+    //conf->cached_path = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -517,6 +783,8 @@ ngx_http_concat_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->ignore_file_error, prev->ignore_file_error, 0);
     ngx_conf_merge_uint_value(conf->max_files, prev->max_files, 10);
     ngx_conf_merge_value(conf->unique, prev->unique, 1);
+    ngx_conf_merge_str_value(conf->cached_path, prev->cached_path, "/tmp/");
+
 
     if (ngx_http_merge_types(cf, &conf->types_keys, &conf->types,
                              &prev->types_keys, &prev->types,
