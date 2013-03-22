@@ -181,12 +181,12 @@ ngx_http_concat_handler(ngx_http_request_t *r)
 
     path.len = last - path.data;
 
-    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "http concat root: \"%V\"", &path);
 
     ccf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 
-    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "http cached path: \"%s\"", clcf->cached_path.data);
 
 
@@ -249,8 +249,8 @@ ngx_http_concat_handler(ngx_http_request_t *r)
     length = 0;
     uri = uris.elts;
 
-    ngx_str_t md5_str;
 
+    ngx_str_t md5_str;
     for (i = 0; i < uris.nelts; i++) {
         filename = uri + i;
 
@@ -267,8 +267,8 @@ ngx_http_concat_handler(ngx_http_request_t *r)
         }
 
         ngx_http_minified_file(r,filename);
-	md5_str = ngx_md5_path_hash(filename,r);
-        
+     	md5_str = ngx_md5_path_hash(filename,r);
+      
         *filename = ngx_cached_filename(&clcf->cached_path,filename,&md5_str,r);
 
         r->headers_out.content_type.len = 0;
@@ -306,7 +306,7 @@ ngx_http_concat_handler(ngx_http_request_t *r)
         of.errors = ccf->open_file_cache_errors;
         of.events = ccf->open_file_cache_events;
 
-	ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "http open cached file: \"%s\"", filename->data);
         if (ngx_open_cached_file(ccf->open_file_cache, filename, &of, r->pool)
             != NGX_OK)
@@ -457,15 +457,6 @@ ngx_http_concat_handler(ngx_http_request_t *r)
         b->last_buf = 1;
     }
 
-    //just test for create time file
-    /*ngx_str_t tmp_filename= ngx_string("/tmp/aaaaa.txt");
-    ngx_fd_t wfd = ngx_open_file(tmp_filename.data,NGX_FILE_RDWR,NGX_FILE_OPEN,0);
-    ngx_file_t  wfile ;
-    wfile.fd = wfd;
-    wfile.name = tmp_filename;
-    */
-
-    //ngx_write_chain_to_file(&wfile,&out,0,r->pool);
     return ngx_http_output_filter(r, &out);
 }
 
@@ -738,7 +729,7 @@ ngx_http_concat_add_path(ngx_http_request_t *r, ngx_array_t *uris,
         return NGX_HTTP_BAD_REQUEST;
     }
 
-    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                    "http concat add file: \"%s\"", uri->data);
 
     return NGX_OK;
