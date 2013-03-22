@@ -105,7 +105,7 @@ directive. Set it to the value you need.
 
 **default**: NONE
 
-**context**: `http, server, locatione`
+**context**: `http, server, location`
 
 Defines the **delimiter** between two files.
 If the config is **concat_delimiter "\n"**,a '\n' would be inserted betwen 1.js and 2.js when
@@ -124,6 +124,15 @@ Whether to ignore 404 and 403 or not.
 
 <br/>
 <br/>
+
+**concat_cached_path**: string
+
+**default**: default value is "/tmp" if not set
+
+**context**: `http, server, location`
+
+
+
 
 ## Installation
 
